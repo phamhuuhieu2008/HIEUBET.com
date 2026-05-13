@@ -6,11 +6,15 @@ const fsSync = require('fs');
 const path = require('path');
 
 const app = express();
-app.use(cors());
+app.use(cors({
+    origin: '*', // Cho phép tất cả các nguồn truy cập (bao gồm GitHub Pages)
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    allowedHeaders: ['Content-Type']
+}));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '.')));
 
-// --- QUẢN LÝ FILE JSON ---
+// --- QUẢN LÝ CƠ SỞ DỮ LIỆU JSON ---
 const DATA_DIR = path.join(__dirname, 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const DEPOSITS_FILE = path.join(DATA_DIR, 'deposits.json');
@@ -32,25 +36,36 @@ oldFiles.forEach(file => {
 
 function loadData(file, defaultVal = {}) {
     try {
+        let data = defaultVal;
         if (fsSync.existsSync(file)) {
             const content = fsSync.readFileSync(file, 'utf8');
-            return content ? JSON.parse(content) : defaultVal;
+            data = content ? JSON.parse(content) : defaultVal;
         }
-    } catch (e) { console.error(`Lỗi đọc file ${file}:`, e.message); }
-    return defaultVal;
+        // Đảm bảo Admin luôn có trong danh sách users
+        if (file === USERS_FILE) {
+            return { ...DEFAULT_ADMIN, ...data };
+        }
+        return data;
+    } catch (e) {
+        console.error(`Lỗi đọc file ${file}:`, e.message);
+        return defaultVal;
+    }
 }
 
-async function saveData(file, data) {
+function saveData(file, data) {
     try {
-        // Chuyển sang ghi file bất đồng bộ để tránh block event loop
-        const jsonData = JSON.stringify(data, null, 2);
-        await fs.writeFile(file, jsonData, 'utf8');
+        const jsonData = JSON.stringify(data, null, 4); // Dùng 4 spaces để dễ đọc hơn
+        const dir = path.dirname(file);
+        // Đảm bảo thư mục tồn tại trước khi ghi
+        if (!fsSync.existsSync(dir)) fsSync.mkdirSync(dir, { recursive: true });
+        fsSync.writeFileSync(file, jsonData, 'utf8');
     } catch (e) { console.error(`Lỗi ghi file ${file}:`, e.message); }
 }
 
-let users = loadData(USERS_FILE, {
+const DEFAULT_ADMIN = {
     "0708069602": { password: "admin", balance: 99999999, isLocked: false, betHistory: [], withdrawHistory: [] }
-});
+};
+let users = loadData(USERS_FILE, DEFAULT_ADMIN);
 let deposits = loadData(DEPOSITS_FILE, []);
 let withdraws = loadData(WITHDRAWS_FILE, []);
 
@@ -62,10 +77,11 @@ let nextResultOverride = 'random';
 app.post('/api/deposit', async (req, res) => {
     try {
         const { username, amount, code } = req.body;
+        users = loadData(USERS_FILE, DEFAULT_ADMIN); // Đồng bộ lại từ JSON
         if (!users[username]) return res.json({ success: false, message: "Người dùng không tồn tại" });
 
         deposits.push({ id: Date.now(), user: username, amount: parseInt(amount), code, status: 'Pending', time: new Date() });
-        await saveData(DEPOSITS_FILE, deposits);
+        saveData(DEPOSITS_FILE, deposits);
         res.json({ success: true, message: "Yêu cầu nạp đã gửi! Vui lòng chờ Admin xác nhận." });
     } catch (e) { res.json({ success: false, message: "Lỗi hệ thống" }); }
 });
@@ -76,6 +92,7 @@ app.post('/api/deposit', async (req, res) => {
 app.post('/api/withdraw', async (req, res) => {
     try {
         const { username, amount, bankName, accountNumber, accountHolder } = req.body;
+        users = loadData(USERS_FILE, DEFAULT_ADMIN); // Đồng bộ lại từ JSON
         const user = users[username];
 
         if (user && user.balance >= amount) {
@@ -83,8 +100,8 @@ app.post('/api/withdraw', async (req, res) => {
             const req = { id: Date.now(), user: username, amount: parseInt(amount), bankName, accountNumber, accountHolder, status: 'Đang xử lý', time: new Date() };
             user.withdrawHistory.unshift(req);
             withdraws.push(req);
-            await saveData(USERS_FILE, users);
-            await saveData(WITHDRAWS_FILE, withdraws);
+            saveData(USERS_FILE, users);
+            saveData(WITHDRAWS_FILE, withdraws);
             res.json({ success: true, balance: user.balance, withdrawHistory: user.withdrawHistory });
         } else { res.json({ success: false, message: "Số dư không đủ!" }); }
     } catch (e) { res.json({ success: false, message: "Lỗi hệ thống" }); }
@@ -96,24 +113,31 @@ app.post('/api/withdraw', async (req, res) => {
 app.post('/api/register', async (req, res) => {
     try {
         const { username, password } = req.body;
-        if (users[username]) return res.json({ success: false, message: "Tài khoản đã tồn tại!" });
+        if (!username || !password) return res.json({ success: false, message: "Thiếu thông tin!" });
 
-        users[username] = { password, balance: 10000, isLocked: false, betHistory: [], withdrawHistory: [] };
-        await saveData(USERS_FILE, users);
+        // Đọc lại từ file để đảm bảo không trùng lặp dữ liệu mới nhất
+        const currentUsers = loadData(USERS_FILE, DEFAULT_ADMIN);
+        if (currentUsers[username]) return res.json({ success: false, message: "Tài khoản đã tồn tại!" });
+
+        currentUsers[username] = { password, balance: 10000, isLocked: false, betHistory: [], withdrawHistory: [] };
+        saveData(USERS_FILE, currentUsers);
+        users = currentUsers; // Cập nhật bộ nhớ tạm
         res.json({ success: true, message: "Đăng ký thành công!" });
     } catch (e) { res.json({ success: false, message: "Lỗi hệ thống" }); }
 });
 
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
-    const user = users[username];
+    const currentUsers = loadData(USERS_FILE, DEFAULT_ADMIN);
+    const user = currentUsers[username];
+
     if (user && user.password === password) {
         if (user.isLocked) return res.json({ success: false, message: "Tài khoản bị khóa!" });
         res.json({ success: true, user: { username, balance: user.balance, betHistory: user.betHistory, withdrawHistory: user.withdrawHistory } });
     } else { res.json({ success: false, message: "Sai tài khoản hoặc mật khẩu!" }); }
 });
 
-app.get('/api/user/:username', async (req, res) => {
+app.get('/api/user/:username', (req, res) => {
     const user = users[req.params.username];
     if (user) res.json({ success: true, user: { ...user, username: req.params.username } });
     else res.json({ success: false, message: "User not found" });
@@ -139,7 +163,7 @@ app.post('/api/update-profile', async (req, res) => {
         user.phone = phone;
         if (avatar) user.avatar = avatar; // Lưu base64
 
-        await saveData(USERS_FILE, users);
+        saveData(USERS_FILE, users);
         res.json({ success: true, message: "Cập nhật thành công" });
     } catch (e) {
         res.json({ success: false, message: "Lỗi hệ thống" });
@@ -157,7 +181,7 @@ app.post('/api/place-bet', async (req, res) => {
     const betId = Date.now();
     user.balance -= amount;
     user.betHistory.unshift({ id: betId, side, amount, result: 'Đang chờ', time: new Date() });
-    await saveData(USERS_FILE, users);
+    saveData(USERS_FILE, users);
     res.json({ success: true, balance: user.balance, betHistory: user.betHistory, betId });
 });
 
@@ -190,7 +214,7 @@ app.post('/api/resolve-bet', async (req, res) => {
             bet.winAmount = 0;
         }
         nextResultOverride = 'random';
-        await saveData(USERS_FILE, users);
+        saveData(USERS_FILE, users);
         return res.json({ success: true, balance: user.balance, dice: [d1, d2, d3], total, betHistory: user.betHistory });
     }
     res.json({ success: false });
@@ -212,7 +236,7 @@ app.post('/api/admin/action', async (req, res) => {
         if (idx !== -1 && users[deposits[idx].user]) {
             users[deposits[idx].user].balance += deposits[idx].amount;
             deposits[idx].status = 'Success';
-            await saveData(USERS_FILE, users); await saveData(DEPOSITS_FILE, deposits);
+            saveData(USERS_FILE, users); saveData(DEPOSITS_FILE, deposits);
             return res.json({ success: true });
         }
     } else if (type === 'approveWithdraw') {
@@ -223,17 +247,23 @@ app.post('/api/admin/action', async (req, res) => {
             else if (req.status === 'Đang chuyển') { req.status = 'Hoàn thành'; withdraws.splice(idx, 1); }
             const hIdx = user.withdrawHistory.findIndex(h => h.id == reqId);
             if (hIdx !== -1) user.withdrawHistory[hIdx].status = req.status;
-            await saveData(USERS_FILE, users); await saveData(WITHDRAWS_FILE, withdraws);
+            saveData(USERS_FILE, users); saveData(WITHDRAWS_FILE, withdraws);
             return res.json({ success: true });
         }
     } else if (type === 'lock') {
-        if (users[target]) { users[target].isLocked = value; await saveData(USERS_FILE, users); return res.json({ success: true }); }
+        if (users[target]) { users[target].isLocked = value; saveData(USERS_FILE, users); return res.json({ success: true }); }
     } else if (type === 'delete') {
-        delete users[target]; await saveData(USERS_FILE, users); return res.json({ success: true });
+        delete users[target]; saveData(USERS_FILE, users); return res.json({ success: true });
     }
 
     res.json({ success: false });
 });
 
-const PORT = process.env.PORT || 10000; // Render thường sử dụng port 10000 mặc định
-app.listen(PORT, () => console.log(`Server API đang chạy tại port ${PORT}`));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`-----------------------------------------`);
+    console.log(`🚀 HIEUBET SERVER ĐANG CHẠY THÀNH CÔNG!`);
+    console.log(`🔗 Truy cập ngay tại: http://127.0.0.1:${PORT}`);
+    console.log(`💡 Lưu ý: Đừng đóng cửa sổ Terminal này khi chơi.`);
+    console.log(`-----------------------------------------`);
+});

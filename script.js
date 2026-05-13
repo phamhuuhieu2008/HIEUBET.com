@@ -3,18 +3,36 @@ let balance = 0;
 let betHistory = [];
 let withdrawHistory = [];
 
-// Sử dụng đường dẫn tương đối để hoạt động trên cả localhost, IP nội bộ và khi deploy web
-const API_URL = "";
+// Tự động nhận diện địa chỉ API
+const getApiUrl = () => {
+    const { hostname, port, protocol } = window.location;
+    // Nếu mở file trực tiếp (file://)
+    if (protocol === 'file:') return "http://127.0.0.1:3000";
+
+    // Nếu đang chạy ở cổng khác 3000 (như Live Server 5500), tự động trỏ về cổng 3000 của Node.js
+    if (port !== "3000" && port !== "") {
+        // Ép http để tránh lỗi Mixed Content hoặc ERR_CONNECTION_REFUSED do HTTPS
+        return `http://${hostname}:3000`;
+    }
+    return ""; // Dùng đường dẫn tương đối khi đã chạy đúng cổng server
+};
+const API_URL = getApiUrl();
 
 async function fetchData(endpoint, options = {}) {
+    const url = `${API_URL}${endpoint}`;
+    console.log(`📡 Đang gọi API: ${url}`);
     return fetch(`${API_URL}${endpoint}`, {
         method: options.method || 'GET',
         headers: { 'Content-Type': 'application/json' },
         body: options.body ? JSON.stringify(options.body) : null
     })
-        .then(res => res.json())
+        .then(res => {
+            if (!res.ok) throw new Error("Server trả về lỗi");
+            return res.json();
+        })
         .catch(error => {
-            if (currentUser) showToast("⚠️ Mất kết nối server!", "error");
+            console.error("Fetch Error:", error);
+            showToast("❌ Không thể kết nối đến Server! Hãy chắc chắn bạn đã chạy 'node server.js' trong Terminal.", "error");
             return { success: false, message: "Lỗi kết nối server." };
         });
 }
@@ -26,22 +44,44 @@ function toggleAuth(isRegister) {
 }
 
 async function handleRegister() {
+    const btn = document.querySelector('#registerForm button');
     const user = document.getElementById('regUser').value.trim();
     const pass = document.getElementById('regPass').value;
     const confirm = document.getElementById('regPassConfirm').value;
+
     if (!user || user.length < 4) return showToast("Tên đăng nhập tối thiểu 4 ký tự", "error");
     if (pass.length < 4) return showToast("Mật khẩu tối thiểu 4 ký tự", "error");
     if (pass !== confirm) return showToast("Mật khẩu nhập lại không khớp", "error");
+
+    btn.disabled = true;
+    btn.textContent = "ĐANG XỬ LÝ...";
+
     const res = await fetchData('/api/register', { method: 'POST', body: { username: user, password: pass } });
+
+    btn.disabled = false;
+    btn.textContent = "ĐĂNG KÝ TÀI KHOẢN";
+
     if (!res.success) return showToast(res.message, "error");
-    showToast("🎉 Đăng ký thành công!");
+
+    showToast("🎉 Đăng ký thành công! Hãy đăng nhập.");
     toggleAuth(false);
 }
 
 async function handleLogin() {
     const user = document.getElementById('loginUser').value.trim();
     const pass = document.getElementById('loginPass').value;
+    const btn = document.querySelector('#loginForm button');
+
+    if (!user || !pass) return showToast("Vui lòng nhập đầy đủ!", "error");
+
+    btn.disabled = true;
+    btn.textContent = "ĐANG ĐĂNG NHẬP...";
+
     const res = await fetchData('/api/login', { method: 'POST', body: { username: user, password: pass } });
+
+    btn.disabled = false;
+    btn.textContent = "ĐĂNG NHẬP";
+
     if (res.success) {
         currentUser = res.user.username;
         balance = res.user.balance;
@@ -81,12 +121,6 @@ window.onload = async () => {
     }
 
     document.getElementById('betAmount')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') e.preventDefault(); });
-    document.addEventListener('contextmenu', e => e.preventDefault());
-    document.onkeydown = function (e) {
-        if (e.keyCode == 123) return false;
-        if (e.ctrlKey && e.shiftKey && (e.keyCode == 73 || e.keyCode == 67 || e.keyCode == 74)) return false;
-        if (e.ctrlKey && e.keyCode == 85) return false;
-    };
 
     document.getElementById('playBtn')?.addEventListener('click', (e) => { e.preventDefault(); placeBet(); });
     document.getElementById('bowl')?.addEventListener('click', function () { if (isOpening) this.classList.add('open'); });
@@ -208,13 +242,34 @@ function loadProfileData() {
     });
 }
 
+function showTransferInfo() {
+    const amount = document.getElementById('depositAmount').value;
+    if (!amount || amount < 10000) return showToast("Số tiền tối thiểu 10,000đ", "error");
+    document.getElementById('displayDepositAmount').textContent = parseInt(amount).toLocaleString() + "đ";
+    document.getElementById('depositStep1').classList.add('hidden');
+    document.getElementById('depositStep2').classList.remove('hidden');
+}
+
+async function confirmDeposit(btn) {
+    const amount = document.getElementById('depositAmount').value;
+    const code = document.getElementById('transferCode').textContent;
+    const res = await fetchData('/api/deposit', { method: 'POST', body: { username: currentUser, amount, code } });
+    if (res.success) {
+        showToast(res.message);
+        closeModal('depositModal');
+    } else { showToast(res.message, "error"); }
+}
+
 function showToast(msg, type = 'success') {
     const t = document.getElementById('toast');
     t.textContent = msg;
     t.style.backgroundColor = type === 'success' ? '#10b981' : '#ef4444';
-    t.className = `fixed top-24 left-1/2 -translate-x-1/2 z-[200] px-8 py-4 rounded-full font-bold shadow-2xl toast-active text-white`;
     t.classList.remove('hidden');
-    setTimeout(() => t.classList.add('hidden'), 3000);
+    t.classList.add('toast-active');
+    setTimeout(() => {
+        t.classList.add('hidden');
+        t.classList.remove('toast-active');
+    }, 3000);
 }
 
 let tempAvatarBase64 = null;
